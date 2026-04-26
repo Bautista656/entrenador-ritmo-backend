@@ -4,28 +4,48 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
-const app = express();
-
 const User = require("./models/User");
 const Activity = require("./models/Activity");
 
-const SECRET = "secreto123";
+const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// 🔥 CONEXIÓN A MONGO
-mongoose
-  .connect("mongodb://127.0.0.1:27017/stravaDB")
-  .then(() => console.log("MongoDB conectado"))
-  .catch((err) => console.log("ERROR MONGO:", err));
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGO_URI;
+const JWT_SECRET = process.env.JWT_SECRET || "clave_temporal";
 
-// 🔥 TEST ROUTE
+if (!MONGO_URI) {
+  console.error("ERROR: Falta la variable de entorno MONGO_URI");
+  process.exit(1);
+}
+
+mongoose
+  .connect(MONGO_URI)
+  .then(() => {
+    console.log("MongoDB Atlas conectado correctamente");
+  })
+  .catch((error) => {
+    console.error("Error conectando a MongoDB Atlas:", error.message);
+  });
+
 app.get("/", (req, res) => {
-  res.send("Backend funcionando 🔥");
+  res.json({
+    message: "Backend funcionando correctamente",
+    database: "MongoDB Atlas",
+    status: "OK"
+  });
 });
 
-// 🔥 REGISTER
+app.get("/health", (req, res) => {
+  res.json({
+    status: "OK",
+    server: "online",
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.post("/register", async (req, res) => {
   try {
     console.log("REGISTER:", req.body);
@@ -38,7 +58,11 @@ app.post("/register", async (req, res) => {
       });
     }
 
-    const existingUser = await User.findOne({ email });
+    const emailNormalizado = email.trim().toLowerCase();
+
+    const existingUser = await User.findOne({
+      email: emailNormalizado
+    });
 
     if (existingUser) {
       return res.status(400).json({
@@ -50,13 +74,13 @@ app.post("/register", async (req, res) => {
 
     const user = new User({
       name,
-      email,
+      email: emailNormalizado,
       password: hashedPassword
     });
 
     await user.save();
 
-    res.status(201).json({
+    res.json({
       message: "Usuario registrado correctamente"
     });
 
@@ -69,7 +93,6 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// 🔥 LOGIN
 app.post("/login", async (req, res) => {
   try {
     console.log("LOGIN:", req.body);
@@ -82,7 +105,11 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email });
+    const emailNormalizado = email.trim().toLowerCase();
+
+    const user = await User.findOne({
+      email: emailNormalizado
+    });
 
     if (!user) {
       return res.status(400).json({
@@ -99,13 +126,17 @@ app.post("/login", async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user._id },
-      SECRET,
-      { expiresIn: "7d" }
+      {
+        id: user._id,
+        email: user.email
+      },
+      JWT_SECRET,
+      {
+        expiresIn: "7d"
+      }
     );
 
-    res.status(200).json({
-      message: "Login correcto",
+    res.json({
       token,
       user
     });
@@ -119,7 +150,6 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// 🔥 GUARDAR ACTIVIDAD
 app.post("/activities", async (req, res) => {
   try {
     console.log("ACTIVITY POST:", req.body);
@@ -132,8 +162,6 @@ app.post("/activities", async (req, res) => {
       duration,
       pace,
       notes,
-
-      // Datos extra del reloj / IA, si tu modelo Activity los tiene
       bpm,
       steps,
       cadence,
@@ -163,7 +191,8 @@ app.post("/activities", async (req, res) => {
       steps: Number(steps) || 0,
       cadence: Number(cadence) || 0,
       acceleration: Number(acceleration) || 0,
-      iaClass: iaClass ?? null,
+
+      iaClass: iaClass === null || iaClass === undefined ? null : Number(iaClass),
       iaLabel: iaLabel || "",
       iaConfidence: Number(iaConfidence) || 0,
       iaRecommendation: iaRecommendation || ""
@@ -171,7 +200,7 @@ app.post("/activities", async (req, res) => {
 
     await activity.save();
 
-    res.status(201).json({
+    res.json({
       message: "Actividad guardada correctamente",
       activity
     });
@@ -180,53 +209,39 @@ app.post("/activities", async (req, res) => {
     console.log("ERROR ACTIVITY POST:", error);
 
     res.status(500).json({
-      error: "Error al guardar actividad",
-      details: error.message
+      error: "Error al guardar actividad"
     });
   }
 });
 
-// 🔥 OBTENER ACTIVIDADES POR USUARIO
 app.get("/activities/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
     console.log("GET ACTIVITIES USER:", userId);
 
-    if (!userId) {
-      return res.status(400).json({
-        error: "Falta userId"
-      });
-    }
+    const activities = await Activity.find({
+      userId
+    }).sort({
+      createdAt: -1
+    });
 
-    const activities = await Activity
-      .find({ userId })
-      .sort({ date: -1, createdAt: -1 });
-
-    res.status(200).json(activities);
+    res.json(activities);
 
   } catch (error) {
     console.log("ERROR ACTIVITY GET:", error);
 
     res.status(500).json({
-      error: "Error al obtener actividades",
-      details: error.message
+      error: "Error al obtener actividades"
     });
   }
 });
 
-// 🔥 ELIMINAR ACTIVIDAD POR ID
 app.delete("/activities/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
     console.log("DELETE ACTIVITY ID:", id);
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        message: "ID de actividad inválido"
-      });
-    }
 
     const activityDeleted = await Activity.findByIdAndDelete(id);
 
@@ -236,13 +251,12 @@ app.delete("/activities/:id", async (req, res) => {
       });
     }
 
-    res.status(200).json({
-      message: "Actividad eliminada correctamente",
-      activityDeleted
+    res.json({
+      message: "Actividad eliminada correctamente"
     });
 
   } catch (error) {
-    console.log("ERROR DELETE ACTIVITY:", error);
+    console.log("ERROR ACTIVITY DELETE:", error);
 
     res.status(500).json({
       message: "Error al eliminar actividad",
@@ -251,7 +265,6 @@ app.delete("/activities/:id", async (req, res) => {
   }
 });
 
-// 🔥 SERVER
-app.listen(3000, "0.0.0.0", () => {
-  console.log("Servidor corriendo en puerto 3000");
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
