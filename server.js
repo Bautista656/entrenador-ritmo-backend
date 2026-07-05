@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 3000;
 
 const User = require("./models/User");
 const Activity = require("./models/Activity");
+const Meal = require("./models/Meal");
 
 const app = express();
 
@@ -320,6 +321,9 @@ function normalizarResultado(obj) {
       portion: "",
       estimatedCalories: 0,
       calorieRange: "",
+      protein: 0,
+      carbs: 0,
+      fats: 0,
       confidence: "baja",
       observation: obj?.observation || "No se detectó comida en la imagen",
     };
@@ -332,6 +336,9 @@ function normalizarResultado(obj) {
     portion: String(obj?.portion || "Porción no clara"),
     estimatedCalories: Number(obj?.estimatedCalories) || 0,
     calorieRange: String(obj?.calorieRange || ""),
+    protein: Number(obj?.protein) || 0,
+    carbs: Number(obj?.carbs) || 0,
+    fats: Number(obj?.fats) || 0,
     confidence: String(obj?.confidence || "media"),
     observation: String(obj?.observation || ""),
   };
@@ -346,6 +353,9 @@ const RESPONSE_SCHEMA = {
     portion: { type: "string" },
     estimatedCalories: { type: "number" },
     calorieRange: { type: "string" },
+    protein: { type: "number" },
+    carbs: { type: "number" },
+    fats: { type: "number" },
     confidence: { type: "string" },
     observation: { type: "string" },
   },
@@ -356,6 +366,9 @@ const RESPONSE_SCHEMA = {
     "portion",
     "estimatedCalories",
     "calorieRange",
+    "protein",
+    "carbs",
+    "fats",
     "confidence",
     "observation",
   ],
@@ -412,18 +425,21 @@ app.post("/analyze-food", async (req, res) => {
                     'Analiza esta imagen de alimento o bebida. ' +
                     'Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. ' +
                     'Si SÍ hay comida o bebida, identifica el alimento, la porción visible, una categoría ' +
-                    '(plato, paquete, bebida o snack) y una estimación de calorías con su rango. ' +
+                    '(plato, paquete, bebida o snack), una estimación de calorías con su rango, y una estimación ' +
+                    'de macronutrientes en gramos: protein (proteína), carbs (carbohidratos) y fats (grasas). ' +
                     "Reglas: " +
                     "1. Nunca des una cifra que parezca medida con precisión de laboratorio (evita cosas como 782 o 347). " +
                     "Redondea estimatedCalories a un múltiplo de 10 (para snacks/porciones chicas) o de 50 " +
                     "(para platos completos o paquetes), como haría una persona calculando a ojo. " +
                     "2. calorieRange debe ser un rango realista y no demasiado angosto (ej. una diferencia de al menos " +
                     "10-15% entre el mínimo y el máximo), reflejando la incertidumbre real de estimar por una foto. " +
-                    "3. Si es un producto empaquetado con tabla nutricional visible o legible, puedes usar esos datos " +
+                    "3. Redondea protein, carbs y fats a números enteros o a la unidad de 5 gramos más cercana; " +
+                    "son aproximaciones, no mediciones exactas. " +
+                    "4. Si es un producto empaquetado con tabla nutricional visible o legible, puedes usar esos datos " +
                     "como referencia, pero igual repórtalos como aproximación, no como medición exacta. " +
-                    "4. Si la cantidad visible no es clara, usa un rango más amplio en vez de inventar precisión. " +
-                    "5. En observation, deja claro en una frase que es una estimación visual aproximada, no un valor exacto. " +
-                    "6. Responde siempre en español.",
+                    "5. Si la cantidad visible no es clara, usa un rango más amplio en vez de inventar precisión. " +
+                    "6. En observation, deja claro en una frase que es una estimación visual aproximada, no un valor exacto. " +
+                    "7. Responde siempre en español.",
                 },
               ],
             },
@@ -493,6 +509,152 @@ app.post("/analyze-food", async (req, res) => {
     res.status(500).json({
       error: "Error al analizar comida",
       details: error.message,
+    });
+  }
+});
+
+// -----------------------------
+// Endpoints de comidas (Meal)
+// -----------------------------
+
+function fechaHoyString() {
+  return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+}
+
+app.post("/meals", async (req, res) => {
+  try {
+    console.log("MEAL POST:", req.body);
+
+    const {
+      userId,
+      foodName,
+      category,
+      portion,
+      estimatedCalories,
+      calorieRange,
+      protein,
+      carbs,
+      fats,
+      confidence,
+      observation,
+      date,
+    } = req.body;
+
+    if (!userId || !foodName) {
+      return res.status(400).json({
+        error: "Faltan datos obligatorios (userId, foodName)",
+      });
+    }
+
+    const meal = new Meal({
+      userId,
+      foodName,
+      category: category || "",
+      portion: portion || "",
+      estimatedCalories: Number(estimatedCalories) || 0,
+      calorieRange: calorieRange || "",
+      protein: Number(protein) || 0,
+      carbs: Number(carbs) || 0,
+      fats: Number(fats) || 0,
+      confidence: confidence || "",
+      observation: observation || "",
+      date: date || fechaHoyString(),
+    });
+
+    await meal.save();
+
+    res.json({
+      message: "Comida guardada correctamente",
+      meal,
+    });
+  } catch (error) {
+    console.log("ERROR MEAL POST:", error);
+
+    res.status(500).json({
+      error: "Error al guardar la comida",
+    });
+  }
+});
+
+// GET /meals/:userId            -> todas las comidas del usuario
+// GET /meals/:userId?date=YYYY-MM-DD -> solo las de ese día (para el total diario)
+app.get("/meals/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { date } = req.query;
+
+    console.log("GET MEALS USER:", userId, "date:", date || "(todas)");
+
+    const filtro = date ? { userId, date } : { userId };
+
+    const meals = await Meal.find(filtro).sort({ createdAt: -1 });
+
+    res.json(meals);
+  } catch (error) {
+    console.log("ERROR MEAL GET:", error);
+
+    res.status(500).json({
+      error: "Error al obtener las comidas",
+    });
+  }
+});
+
+// GET /meals/:userId/summary?date=YYYY-MM-DD -> totales del día (calorías + macros)
+app.get("/meals/:userId/summary", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const date = req.query.date || fechaHoyString();
+
+    const meals = await Meal.find({ userId, date });
+
+    const resumen = meals.reduce(
+      (acc, meal) => {
+        acc.totalCalories += meal.estimatedCalories || 0;
+        acc.totalProtein += meal.protein || 0;
+        acc.totalCarbs += meal.carbs || 0;
+        acc.totalFats += meal.fats || 0;
+        return acc;
+      },
+      { totalCalories: 0, totalProtein: 0, totalCarbs: 0, totalFats: 0 }
+    );
+
+    res.json({
+      date,
+      cantidadComidas: meals.length,
+      ...resumen,
+    });
+  } catch (error) {
+    console.log("ERROR MEAL SUMMARY:", error);
+
+    res.status(500).json({
+      error: "Error al calcular el resumen del día",
+    });
+  }
+});
+
+app.delete("/meals/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    console.log("DELETE MEAL ID:", id);
+
+    const mealEliminada = await Meal.findByIdAndDelete(id);
+
+    if (!mealEliminada) {
+      return res.status(404).json({
+        message: "Comida no encontrada",
+      });
+    }
+
+    res.json({
+      message: "Comida eliminada correctamente",
+    });
+  } catch (error) {
+    console.log("ERROR MEAL DELETE:", error);
+
+    res.status(500).json({
+      message: "Error al eliminar comida",
+      error: error.message,
     });
   }
 });
