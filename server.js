@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const FOOD_API_KEY = process.env.FOOD_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 const User = require("./models/User");
 const Activity = require("./models/Activity");
@@ -272,9 +272,9 @@ app.post("/analyze-food", async (req, res) => {
   try {
     const { imageBase64 } = req.body;
 
-    if (!FOOD_API_KEY) {
+    if (!GEMINI_API_KEY) {
       return res.status(500).json({
-        error: "Falta FOOD_API_KEY en el servidor"
+        error: "Falta GEMINI_API_KEY en el servidor"
       });
     }
 
@@ -284,40 +284,34 @@ app.post("/analyze-food", async (req, res) => {
       });
     }
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": FOOD_API_KEY,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: "claude-3-5-haiku-latest",
-        max_tokens: 800,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: "image/jpeg",
-                  data: imageBase64
-                }
-              },
-              {
-                type: "text",
-                text:
-                  "Analiza esta imagen. Si NO es comida, responde solamente: NO_COMIDA. " +
-                  "Si sí es comida, responde SOLO en JSON válido con este formato exacto: " +
-                  "{\"detectedFoods\":[{\"name\":\"nombre\",\"calories\":123}],\"totalCalories\":123,\"message\":\"observación breve\"}"
-              }
-            ]
-          }
-        ]
-      })
-    });
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/interactions",
+      {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": GEMINI_API_KEY,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+         model: "gemini-3-flash-preview",
+          input: [
+            {
+              type: "text",
+              text:
+                'Analiza esta imagen. Si NO es comida, responde SOLO este JSON exacto: {"detectedFoods":[],"totalCalories":0,"message":"No se detectó comida en la imagen"}. ' +
+                'Si SÍ es comida, responde SOLO JSON válido con este formato exacto: ' +
+                '{"detectedFoods":[{"name":"nombre","calories":123}],"totalCalories":123,"message":"observación breve"}. ' +
+                "No agregues texto fuera del JSON."
+            },
+            {
+              type: "image",
+              data: imageBase64,
+              mime_type: "image/jpeg"
+            }
+          ]
+        })
+      }
+    );
 
     const data = await response.json();
 
@@ -328,20 +322,15 @@ app.post("/analyze-food", async (req, res) => {
       });
     }
 
-    if (!data.content || !data.content[0] || !data.content[0].text) {
+    const texto =
+      data?.output?.[0]?.content?.[0]?.text ||
+      data?.output_text ||
+      "";
+
+    if (!texto) {
       return res.status(500).json({
-        error: "Respuesta inesperada de la IA",
+        error: "Respuesta inesperada de Gemini",
         details: data
-      });
-    }
-
-    const texto = data.content[0].text.trim();
-
-    if (texto === "NO_COMIDA") {
-      return res.json({
-        detectedFoods: [],
-        totalCalories: 0,
-        message: "No se detectó comida en la imagen"
       });
     }
 
@@ -350,13 +339,12 @@ app.post("/analyze-food", async (req, res) => {
       resultado = JSON.parse(texto);
     } catch (e) {
       return res.status(500).json({
-        error: "La IA no devolvió JSON válido",
+        error: "Gemini no devolvió JSON válido",
         raw: texto
       });
     }
 
     return res.json(resultado);
-
   } catch (error) {
     console.log("ERROR ANALYZE FOOD:", error);
 
