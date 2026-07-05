@@ -1,8 +1,10 @@
+require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const FOOD_API_KEY = process.env.FOOD_API_KEY;
 
 const User = require("./models/User");
 const Activity = require("./models/Activity");
@@ -261,6 +263,41 @@ app.delete("/activities/:id", async (req, res) => {
     res.status(500).json({
       message: "Error al eliminar actividad",
       error: error.message
+    });
+  }
+});
+
+app.post("/analyze-food", async (req, res) => {
+  try {
+    const { imageBase64 } = req.body;
+
+    if (!imageBase64) {
+      return res.status(400).json({
+        error: "Falta la imagen en base64"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Ruta de análisis funcionando correctamente",
+      detectedFoods: [
+        {
+          name: "Taco",
+          calories: 180
+        },
+        {
+          name: "Nachos",
+          calories: 250
+        }
+      ],
+      totalCalories: 430
+    });
+  } catch (error) {
+    console.log("ERROR ANALYZE FOOD:", error);
+
+    res.status(500).json({
+      error: "Error en analyze-food",
+      details: error.message
     });
   }
 });
