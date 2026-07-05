@@ -322,17 +322,24 @@ app.post("/analyze-food", async (req, res) => {
       });
     }
 
-    const texto =
-      data?.output?.[0]?.content?.[0]?.text ||
-      data?.output_text ||
-      "";
+   const modelStep = Array.isArray(data.steps)
+  ? data.steps.find((step) => step.type === "model_output")
+  : null;
 
-    if (!texto) {
-      return res.status(500).json({
-        error: "Respuesta inesperada de Gemini",
-        details: data
-      });
-    }
+const textParts = Array.isArray(modelStep?.content)
+  ? modelStep.content
+      .filter((part) => part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+  : [];
+
+const texto = textParts.join("\n").trim();
+
+if (!texto) {
+  return res.status(500).json({
+    error: "Respuesta inesperada de Gemini",
+    details: data
+  });
+}
 
     let resultado;
     try {
