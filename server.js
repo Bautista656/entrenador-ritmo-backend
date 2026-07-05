@@ -261,6 +261,42 @@ app.delete("/activities/:id", async (req, res) => {
   }
 });
 
+// -----------------------------
+// Helpers para /analyze-food
+// -----------------------------
+
+const MIME_TYPES_PERMITIDOS = [
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+];
+
+// Quita el prefijo "data:image/xxx;base64," si el frontend lo envía tal cual,
+// y detecta el mimeType real de la imagen. Esta era una causa muy común de
+// que Gemini "no reconociera" nada: el base64 llegaba con el prefijo incluido
+// y la API lo interpretaba como datos corruptos.
+function limpiarImagenBase64(imageBase64, mimeTypeDeclarado) {
+  let mimeType = mimeTypeDeclarado || "image/jpeg";
+  let data = imageBase64 || "";
+
+  const match = data.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/s);
+  if (match) {
+    mimeType = match[1];
+    data = match[2];
+  }
+
+  data = data.trim();
+
+  if (!MIME_TYPES_PERMITIDOS.includes(mimeType)) {
+    mimeType = "image/jpeg";
+  }
+
+  return { data, mimeType };
+}
+
 function limpiarJsonTexto(texto) {
   let limpio = texto.trim();
 
@@ -301,9 +337,33 @@ function normalizarResultado(obj) {
   };
 }
 
+const RESPONSE_SCHEMA = {
+  type: "object",
+  properties: {
+    isFood: { type: "boolean" },
+    foodName: { type: "string" },
+    category: { type: "string" },
+    portion: { type: "string" },
+    estimatedCalories: { type: "number" },
+    calorieRange: { type: "string" },
+    confidence: { type: "string" },
+    observation: { type: "string" },
+  },
+  required: [
+    "isFood",
+    "foodName",
+    "category",
+    "portion",
+    "estimatedCalories",
+    "calorieRange",
+    "confidence",
+    "observation",
+  ],
+};
+
 app.post("/analyze-food", async (req, res) => {
   try {
-    const { imageBase64 } = req.body;
+    const { imageBase64, mimeType: mimeTypeBody } = req.body;
 
     if (!GEMINI_API_KEY) {
       return res.status(500).json({
@@ -314,6 +374,17 @@ app.post("/analyze-food", async (req, res) => {
     if (!imageBase64) {
       return res.status(400).json({
         error: "Falta la imagen en base64",
+      });
+    }
+
+    const { data: imagenLimpia, mimeType } = limpiarImagenBase64(
+      imageBase64,
+      mimeTypeBody
+    );
+
+    if (!imagenLimpia) {
+      return res.status(400).json({
+        error: "La imagen en base64 está vacía o mal formada",
       });
     }
 
@@ -328,30 +399,34 @@ app.post("/analyze-food", async (req, res) => {
         body: JSON.stringify({
           contents: [
             {
+              role: "user",
               parts: [
                 {
                   inline_data: {
-                    mime_type: "image/jpeg",
-                    data: imageBase64,
+                    mime_type: mimeType,
+                    data: imagenLimpia,
                   },
                 },
                 {
                   text:
                     'Analiza esta imagen de alimento o bebida. ' +
-                    'Si NO hay comida o bebida visible, responde SOLO este JSON exacto: ' +
-                    '{"isFood":false,"foodName":"","category":"","portion":"","estimatedCalories":0,"calorieRange":"","confidence":"baja","observation":"No se detectó comida en la imagen"}. ' +
-                    'Si SÍ hay comida o bebida, responde SOLO JSON válido con este formato exacto: ' +
-                    '{"isFood":true,"foodName":"nombre del alimento","category":"plato|paquete|bebida|snack","portion":"descripción breve de la porción detectada","estimatedCalories":123,"calorieRange":"100-150 kcal","confidence":"alta|media|baja","observation":"explicación breve y realista"}. ' +
+                    'Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. ' +
+                    'Si SÍ hay comida o bebida, identifica el alimento, la porción visible, una categoría ' +
+                    '(plato, paquete, bebida o snack) y una estimación razonable de calorías con su rango. ' +
                     "Reglas: " +
-                    "1. No inventes precisión exacta. " +
-                    "2. Da una estimación razonable y creíble. " +
-                    "3. Si es un producto empaquetado, indica si parece el paquete completo o solo referencia visual. " +
-                    "4. Si la cantidad visible no es clara, usa un rango conservador. " +
-                    "5. No agregues texto fuera del JSON.",
+                    "1. No inventes precisión exacta, da una estimación creíble. " +
+                    "2. Si es un producto empaquetado, indica si es el paquete completo o solo una referencia visual. " +
+                    "3. Si la cantidad visible no es clara, usa un rango conservador. " +
+                    "4. Responde siempre en español.",
                 },
               ],
             },
           ],
+          generationConfig: {
+            temperature: 0.4,
+            responseMimeType: "application/json",
+            responseSchema: RESPONSE_SCHEMA,
+          },
         }),
       }
     );
@@ -359,14 +434,26 @@ app.post("/analyze-food", async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
+      console.log("ERROR GEMINI API:", JSON.stringify(data));
       return res.status(response.status).json({
         error: "Error de API externa",
         details: data,
       });
     }
 
+    // Si el modelo se negó a responder (safety, etc.) candidates puede venir vacío
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    if (!data?.candidates?.length) {
+      console.log("ERROR ANALYZE FOOD: sin candidates", JSON.stringify(data));
+      return res.status(500).json({
+        error: "Gemini no devolvió resultados",
+        finishReason: finishReason || null,
+        details: data,
+      });
+    }
+
     const textoPlano =
-      data?.candidates?.[0]?.content?.parts
+      data.candidates[0]?.content?.parts
         ?.filter((part) => typeof part.text === "string")
         ?.map((part) => part.text)
         ?.join("\n")
@@ -375,6 +462,7 @@ app.post("/analyze-food", async (req, res) => {
     if (!textoPlano) {
       return res.status(500).json({
         error: "Respuesta inesperada de Gemini",
+        finishReason: finishReason || null,
         details: data,
       });
     }
@@ -385,6 +473,7 @@ app.post("/analyze-food", async (req, res) => {
     try {
       resultado = JSON.parse(textoJson);
     } catch (e) {
+      console.log("ERROR PARSEO JSON. Texto crudo de Gemini:", textoPlano);
       return res.status(500).json({
         error: "Gemini no devolvió JSON válido",
         raw: textoPlano,
