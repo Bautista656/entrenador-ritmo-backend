@@ -272,32 +272,96 @@ app.post("/analyze-food", async (req, res) => {
   try {
     const { imageBase64 } = req.body;
 
+    if (!FOOD_API_KEY) {
+      return res.status(500).json({
+        error: "Falta FOOD_API_KEY en el servidor"
+      });
+    }
+
     if (!imageBase64) {
       return res.status(400).json({
         error: "Falta la imagen en base64"
       });
     }
 
-    res.json({
-      success: true,
-      message: "Ruta de análisis funcionando correctamente",
-      detectedFoods: [
-        {
-          name: "Taco",
-          calories: 180
-        },
-        {
-          name: "Nachos",
-          calories: 250
-        }
-      ],
-      totalCalories: 430
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": FOOD_API_KEY,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: "claude-3-5-haiku-latest",
+        max_tokens: 800,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/jpeg",
+                  data: imageBase64
+                }
+              },
+              {
+                type: "text",
+                text:
+                  "Analiza esta imagen. Si NO es comida, responde solamente: NO_COMIDA. " +
+                  "Si sí es comida, responde SOLO en JSON válido con este formato exacto: " +
+                  "{\"detectedFoods\":[{\"name\":\"nombre\",\"calories\":123}],\"totalCalories\":123,\"message\":\"observación breve\"}"
+              }
+            ]
+          }
+        ]
+      })
     });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: "Error de API externa",
+        details: data
+      });
+    }
+
+    if (!data.content || !data.content[0] || !data.content[0].text) {
+      return res.status(500).json({
+        error: "Respuesta inesperada de la IA",
+        details: data
+      });
+    }
+
+    const texto = data.content[0].text.trim();
+
+    if (texto === "NO_COMIDA") {
+      return res.json({
+        detectedFoods: [],
+        totalCalories: 0,
+        message: "No se detectó comida en la imagen"
+      });
+    }
+
+    let resultado;
+    try {
+      resultado = JSON.parse(texto);
+    } catch (e) {
+      return res.status(500).json({
+        error: "La IA no devolvió JSON válido",
+        raw: texto
+      });
+    }
+
+    return res.json(resultado);
+
   } catch (error) {
     console.log("ERROR ANALYZE FOOD:", error);
 
     res.status(500).json({
-      error: "Error en analyze-food",
+      error: "Error al analizar comida",
       details: error.message
     });
   }
