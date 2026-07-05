@@ -412,12 +412,18 @@ app.post("/analyze-food", async (req, res) => {
                     'Analiza esta imagen de alimento o bebida. ' +
                     'Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. ' +
                     'Si SÍ hay comida o bebida, identifica el alimento, la porción visible, una categoría ' +
-                    '(plato, paquete, bebida o snack) y una estimación razonable de calorías con su rango. ' +
+                    '(plato, paquete, bebida o snack) y una estimación de calorías con su rango. ' +
                     "Reglas: " +
-                    "1. No inventes precisión exacta, da una estimación creíble. " +
-                    "2. Si es un producto empaquetado, indica si es el paquete completo o solo una referencia visual. " +
-                    "3. Si la cantidad visible no es clara, usa un rango conservador. " +
-                    "4. Responde siempre en español.",
+                    "1. Nunca des una cifra que parezca medida con precisión de laboratorio (evita cosas como 782 o 347). " +
+                    "Redondea estimatedCalories a un múltiplo de 10 (para snacks/porciones chicas) o de 50 " +
+                    "(para platos completos o paquetes), como haría una persona calculando a ojo. " +
+                    "2. calorieRange debe ser un rango realista y no demasiado angosto (ej. una diferencia de al menos " +
+                    "10-15% entre el mínimo y el máximo), reflejando la incertidumbre real de estimar por una foto. " +
+                    "3. Si es un producto empaquetado con tabla nutricional visible o legible, puedes usar esos datos " +
+                    "como referencia, pero igual repórtalos como aproximación, no como medición exacta. " +
+                    "4. Si la cantidad visible no es clara, usa un rango más amplio en vez de inventar precisión. " +
+                    "5. En observation, deja claro en una frase que es una estimación visual aproximada, no un valor exacto. " +
+                    "6. Responde siempre en español.",
                 },
               ],
             },
