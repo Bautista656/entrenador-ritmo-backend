@@ -307,6 +307,72 @@ const MODELOS_EN_ORDEN = [
   "gemini-flash-latest",
 ];
 
+const PROMPT_ANALISIS =
+  "Eres un nutriólogo analizando la fotografía de un alimento. " +
+  "Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. " +
+  "Antes de responder, razona en este orden: " +
+  "(a) identifica qué alimento es y si es un producto comercial de marca; " +
+  "(b) si reconoces la marca o alcanzas a leer la etiqueta, BUSCA EN INTERNET su tabla " +
+  "nutricional oficial y usa esos datos reales; " +
+  "(c) determina a qué porción vas a reportar; " +
+  "(d) calcula los macronutrientes de esa porción; " +
+  "(e) verifica que las cifras sean coherentes entre sí antes de entregarlas. " +
+  "REGLA MÁS IMPORTANTE - la porción: " +
+  "Reporta SIEMPRE los valores de UNA porción de consumo normal, NUNCA el paquete completo. " +
+  "Si es un producto empaquetado, usa la porción sugerida de su tabla nutricional " +
+  "(por ejemplo 1 pieza, 2 galletas, 30 g), no el contenido neto total del paquete. " +
+  "Nadie se come un paquete entero de una sentada, y reportar el total da cifras " +
+  "engañosas para quien lleva el conteo de su día. " +
+  "En portion escribe con claridad a qué cantidad corresponden las cifras " +
+  "(ejemplo: '1 tostada (12 g)' o '30 g, aprox. 2 piezas'). " +
+  "Si es comida servida en un plato, usa la porción que se ve en la imagen. " +
+  "Reglas de precisión: " +
+  "1. Si obtuviste los datos de la etiqueta oficial o de una fuente confiable, úsalos tal cual, " +
+  "sin redondearlos ni inflarlos, y pon confidence en alta. " +
+  "2. Si estimas a ojo (comida preparada, sin etiqueta), apóyate en valores conocidos por cada " +
+  "100 g del ingrediente principal y multiplica por la cantidad que ves; redondea " +
+  "estimatedCalories a un múltiplo de 10 y los macronutrientes a enteros, y usa confidence " +
+  "media o baja según qué tan clara se vea la porción. " +
+  "3. calorieRange debe reflejar la incertidumbre real: angosto cuando viene de una etiqueta " +
+  "(±5%), más amplio cuando es estimación visual (±15% o más). " +
+  "4. VERIFICACIÓN OBLIGATORIA de coherencia: la proteína y los carbohidratos aportan 4 kcal " +
+  "por gramo, y las grasas 9 kcal por gramo. Calcula " +
+  "(protein x 4) + (carbs x 4) + (fats x 9) y compáralo con estimatedCalories: deben " +
+  "parecerse. Si no cuadran, corrige tus cifras antes de responder, no entregues números " +
+  "que se contradigan entre sí. " +
+  "5. Cuida que cada macronutriente sea plausible para ese alimento: un producto horneado sin " +
+  "grasa añadida no puede tener 30 g de grasa, y una verdura no puede tener 40 g de proteína. " +
+  "6. En observation, en una sola frase, di a qué porción corresponden las cifras y si vienen " +
+  "de la etiqueta del producto o de una estimación visual. " +
+  "7. El campo confidence debe ser exactamente una de estas tres palabras en español: " +
+  "alta, media o baja. " +
+  "8. Responde siempre en español. " +
+  "FORMATO DE SALIDA: responde ÚNICAMENTE con un objeto JSON válido, sin texto antes ni " +
+  "después, con exactamente estos campos: isFood (booleano), foodName (texto), " +
+  "category (texto: plato, paquete, bebida o snack), portion (texto), " +
+  "estimatedCalories (número), calorieRange (texto), protein (número), carbs (número), " +
+  "fats (número), confidence (texto), observation (texto).";
+
+// La busqueda web de Google y la salida con esquema JSON no son compatibles
+// entre si: al combinarlas la API responde 400 con "Search Grounding can't be
+// used with JSON/YAML/XML mode". Por eso cada modo arma su solicitud distinto,
+// y cuando hay busqueda el JSON se pide por instruccion dentro del prompt.
+function construirCuerpo(partes, conBusqueda) {
+  const cuerpo = {
+    contents: [{ role: "user", parts: partes }],
+    generationConfig: { temperature: 0.4 },
+  };
+
+  if (conBusqueda) {
+    cuerpo.tools = [{ google_search: {} }];
+  } else {
+    cuerpo.generationConfig.responseMimeType = "application/json";
+    cuerpo.generationConfig.responseSchema = RESPONSE_SCHEMA;
+  }
+
+  return cuerpo;
+}
+
 const MIME_TYPES_PERMITIDOS = [
   "image/jpeg",
   "image/jpg",
@@ -348,7 +414,55 @@ function limpiarJsonTexto(texto) {
     limpio = limpio.replace(/^```\s*/i, "").replace(/\s*```$/i, "");
   }
 
+  limpio = limpio.trim();
+
+  // Cuando la busqueda web esta activa no se puede exigir un esquema de salida,
+  // asi que el modelo a veces acompana el JSON con una frase de introduccion o
+  // con las fuentes que consulto. En ese caso se recorta el objeto en si, que
+  // va del primer "{" a su llave de cierre correspondiente.
+  if (!limpio.startsWith("{")) {
+    const inicio = limpio.indexOf("{");
+    const fin = limpio.lastIndexOf("}");
+
+    if (inicio !== -1 && fin > inicio) {
+      limpio = limpio.slice(inicio, fin + 1);
+    }
+  }
+
   return limpio.trim();
+}
+
+// Saca el objeto JSON de la respuesta de Gemini. Devuelve null si la respuesta
+// vino vacia, si el modelo se nego a contestar, o si el texto no es JSON.
+function extraerJson(data) {
+  const texto =
+    data?.candidates?.[0]?.content?.parts
+      ?.filter((part) => typeof part.text === "string")
+      ?.map((part) => part.text)
+      ?.join("\n")
+      ?.trim() || "";
+
+  if (!texto) return null;
+
+  try {
+    return JSON.parse(limpiarJsonTexto(texto));
+  } catch (e) {
+    console.log("No se pudo interpretar como JSON:", texto.slice(0, 300));
+    return null;
+  }
+}
+
+// El modelo a veces devuelve la confianza en ingles ("HIGH", "medium") pese a
+// pedirle espanol, y ese valor se muestra tal cual en la aplicacion. Aqui se
+// traduce a las tres palabras que la pantalla espera.
+function normalizarConfianza(valor) {
+  const texto = String(valor || "").trim().toLowerCase();
+
+  if (["alta", "high", "alto"].includes(texto)) return "alta";
+  if (["baja", "low", "bajo"].includes(texto)) return "baja";
+  if (["media", "medium", "moderada", "medio"].includes(texto)) return "media";
+
+  return "media";
 }
 
 function normalizarResultado(obj) {
@@ -370,7 +484,7 @@ function normalizarResultado(obj) {
     };
   }
 
-  return {
+  const resultado = {
     isFood: true,
     foodName: String(obj?.foodName || "Alimento no identificado"),
     category: String(obj?.category || "plato"),
@@ -380,9 +494,48 @@ function normalizarResultado(obj) {
     protein: Number(obj?.protein) || 0,
     carbs: Number(obj?.carbs) || 0,
     fats: Number(obj?.fats) || 0,
-    confidence: String(obj?.confidence || "media"),
+    confidence: normalizarConfianza(obj?.confidence),
     observation: String(obj?.observation || ""),
   };
+
+  return revisarCoherencia(resultado);
+}
+
+// Comprobacion aritmetica que no depende de que el modelo se acuerde de
+// hacerla: los macronutrientes tienen un aporte energetico fijo, asi que las
+// calorias que se derivan de ellos deben parecerse a las reportadas. Cuando no
+// cuadran, alguna de las dos cifras esta mal y no hay forma de saber cual, por
+// lo que en vez de inventar una correccion se baja la confianza para que el
+// usuario sepa que ese dato merece menos credito.
+function revisarCoherencia(resultado) {
+  const { protein, carbs, fats, estimatedCalories } = resultado;
+
+  const caloriasDeMacros = protein * 4 + carbs * 4 + fats * 9;
+
+  if (estimatedCalories <= 0 || caloriasDeMacros <= 0) {
+    return resultado;
+  }
+
+  const desviacion =
+    Math.abs(caloriasDeMacros - estimatedCalories) / estimatedCalories;
+
+  if (desviacion > 0.25) {
+    console.log(
+      `Incoherencia en ${resultado.foodName}: ${estimatedCalories} kcal declaradas ` +
+        `contra ${Math.round(caloriasDeMacros)} kcal derivadas de los macronutrientes.`
+    );
+
+    resultado.confidence = "baja";
+    resultado.observation = [
+      resultado.observation,
+      "Las cifras de macronutrientes y calorías no terminan de coincidir, " +
+        "así que conviene tomar este resultado solo como referencia.",
+    ]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return resultado;
 }
 
 const RESPONSE_SCHEMA = {
@@ -442,76 +595,65 @@ app.post("/analyze-food", async (req, res) => {
       });
     }
 
-    const cuerpoSolicitud = JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              inline_data: {
-                mime_type: mimeType,
-                data: imagenLimpia,
-              },
-            },
-            {
-              text:
-                'Analiza esta imagen de alimento o bebida. ' +
-                'Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. ' +
-                'Si SÍ hay comida o bebida, identifica el alimento, la porción visible, una categoría ' +
-                '(plato, paquete, bebida o snack), una estimación de calorías con su rango, y una estimación ' +
-                'de macronutrientes en gramos: protein (proteína), carbs (carbohidratos) y fats (grasas). ' +
-                "Reglas: " +
-                "1. Nunca des una cifra que parezca medida con precisión de laboratorio (evita cosas como 782 o 347). " +
-                "Redondea estimatedCalories a un múltiplo de 10 (para snacks/porciones chicas) o de 50 " +
-                "(para platos completos o paquetes), como haría una persona calculando a ojo. " +
-                "2. calorieRange debe ser un rango realista y no demasiado angosto (ej. una diferencia de al menos " +
-                "10-15% entre el mínimo y el máximo), reflejando la incertidumbre real de estimar por una foto. " +
-                "3. Redondea protein, carbs y fats a números enteros o a la unidad de 5 gramos más cercana; " +
-                "son aproximaciones, no mediciones exactas. " +
-                "4. Si es un producto empaquetado con tabla nutricional visible o legible, puedes usar esos datos " +
-                "como referencia, pero igual repórtalos como aproximación, no como medición exacta. " +
-                "5. Si la cantidad visible no es clara, usa un rango más amplio en vez de inventar precisión. " +
-                "6. En observation, deja claro en una frase que es una estimación visual aproximada, no un valor exacto. " +
-                "7. Responde siempre en español.",
-            },
-          ],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.4,
-        responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
-      },
-    });
+    const partes = [
+      { inline_data: { mime_type: mimeType, data: imagenLimpia } },
+      { text: PROMPT_ANALISIS },
+    ];
 
     let response;
     let data;
+    let busquedaDescartada = false;
+    let modeloUsado = null;
+    let busquedaUsada = false;
 
-    for (const modelo of MODELOS_EN_ORDEN) {
-      response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "x-goog-api-key": GEMINI_API_KEY,
-            "Content-Type": "application/json",
-          },
-          body: cuerpoSolicitud,
+    // Se intenta primero con busqueda web activada, porque permite consultar la
+    // tabla nutricional oficial de productos de marca en lugar de estimarla de
+    // memoria. Si Google rechaza esa combinacion, se recurre al metodo con
+    // esquema JSON, que es el que ya se sabe estable.
+    for (const conBusqueda of [true, false]) {
+      if (conBusqueda && busquedaDescartada) continue;
+
+      for (const modelo of MODELOS_EN_ORDEN) {
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`,
+          {
+            method: "POST",
+            headers: {
+              "x-goog-api-key": GEMINI_API_KEY,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(construirCuerpo(partes, conBusqueda)),
+          }
+        );
+
+        data = await response.json();
+
+        if (response.ok) {
+          modeloUsado = modelo;
+          busquedaUsada = conBusqueda;
+          break;
         }
-      );
 
-      data = await response.json();
+        const estado = data?.error?.status;
 
-      // UNAVAILABLE = el modelo esta saturado ahora mismo.
-      // NOT_FOUND = ese modelo ya fue descontinuado por Google.
-      // En ambos casos el siguiente modelo de la lista puede funcionar.
-      const estado = data?.error?.status;
-      const vale_la_pena_seguir =
-        !response.ok && (estado === "UNAVAILABLE" || estado === "NOT_FOUND");
+        // La busqueda web no convive con todas las configuraciones ni con todos
+        // los modelos. Si Google la rechaza de plano, insistir con los demas
+        // modelos solo agrega demora: se pasa directo al metodo con esquema.
+        if (conBusqueda && estado === "INVALID_ARGUMENT") {
+          console.log("Busqueda web no admitida, usando esquema JSON.");
+          busquedaDescartada = true;
+          break;
+        }
 
-      if (!vale_la_pena_seguir) break;
+        // UNAVAILABLE = el modelo esta saturado ahora mismo.
+        // NOT_FOUND = ese modelo ya fue descontinuado por Google.
+        // En ambos casos el siguiente modelo de la lista puede funcionar.
+        if (estado !== "UNAVAILABLE" && estado !== "NOT_FOUND") break;
 
-      console.log(`Modelo ${modelo} no disponible (${estado}), probando siguiente...`);
+        console.log(`Modelo ${modelo} no disponible (${estado}), probando siguiente...`);
+      }
+
+      if (response.ok) break;
     }
 
     if (!response.ok) {
@@ -522,46 +664,49 @@ app.post("/analyze-food", async (req, res) => {
       });
     }
 
-    // Si el modelo se negó a responder (safety, etc.) candidates puede venir vacío
-    const finishReason = data?.candidates?.[0]?.finishReason;
-    if (!data?.candidates?.length) {
-      console.log("ERROR ANALYZE FOOD: sin candidates", JSON.stringify(data));
+    let crudo = extraerJson(data);
+
+    // Con la busqueda activa no hay esquema que garantice el formato, asi que
+    // el modelo puede contestar en prosa. Si pasa, se repite la consulta en modo
+    // esquema, que si obliga al JSON, en vez de darle un error al usuario.
+    if (!crudo && busquedaUsada) {
+      console.log("Sin JSON valido usando busqueda; repitiendo con esquema.");
+
+      const respaldo = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modeloUsado}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "x-goog-api-key": GEMINI_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(construirCuerpo(partes, false)),
+        }
+      );
+
+      if (respaldo.ok) {
+        crudo = extraerJson(await respaldo.json());
+        busquedaUsada = false;
+      }
+    }
+
+    if (!crudo) {
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      console.log("ERROR ANALYZE FOOD: respuesta no interpretable", JSON.stringify(data));
+
       return res.status(500).json({
-        error: "Gemini no devolvió resultados",
+        error: "Gemini no devolvió un resultado interpretable",
         finishReason: finishReason || null,
-        details: data,
       });
     }
 
-    const textoPlano =
-      data.candidates[0]?.content?.parts
-        ?.filter((part) => typeof part.text === "string")
-        ?.map((part) => part.text)
-        ?.join("\n")
-        ?.trim() || "";
-
-    if (!textoPlano) {
-      return res.status(500).json({
-        error: "Respuesta inesperada de Gemini",
-        finishReason: finishReason || null,
-        details: data,
-      });
-    }
-
-    const textoJson = limpiarJsonTexto(textoPlano);
-
-    let resultado;
-    try {
-      resultado = JSON.parse(textoJson);
-    } catch (e) {
-      console.log("ERROR PARSEO JSON. Texto crudo de Gemini:", textoPlano);
-      return res.status(500).json({
-        error: "Gemini no devolvió JSON válido",
-        raw: textoPlano,
-      });
-    }
-
-    return res.json(normalizarResultado(resultado));
+    // modelo y fuente son informativos: permiten comprobar desde fuera si la
+    // busqueda web se llego a usar. La aplicacion los ignora sin problema.
+    return res.json({
+      ...normalizarResultado(crudo),
+      modelo: modeloUsado,
+      fuente: busquedaUsada ? "busqueda_web" : "modelo",
+    });
   } catch (error) {
     console.log("ERROR ANALYZE FOOD:", error);
 
