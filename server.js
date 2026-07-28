@@ -401,59 +401,78 @@ app.post("/analyze-food", async (req, res) => {
       });
     }
 
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
-      {
-        method: "POST",
-        headers: {
-          "x-goog-api-key": GEMINI_API_KEY,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
+    const cuerpoSolicitud = JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [
             {
-              role: "user",
-              parts: [
-                {
-                  inline_data: {
-                    mime_type: mimeType,
-                    data: imagenLimpia,
-                  },
-                },
-                {
-                  text:
-                    'Analiza esta imagen de alimento o bebida. ' +
-                    'Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. ' +
-                    'Si SÍ hay comida o bebida, identifica el alimento, la porción visible, una categoría ' +
-                    '(plato, paquete, bebida o snack), una estimación de calorías con su rango, y una estimación ' +
-                    'de macronutrientes en gramos: protein (proteína), carbs (carbohidratos) y fats (grasas). ' +
-                    "Reglas: " +
-                    "1. Nunca des una cifra que parezca medida con precisión de laboratorio (evita cosas como 782 o 347). " +
-                    "Redondea estimatedCalories a un múltiplo de 10 (para snacks/porciones chicas) o de 50 " +
-                    "(para platos completos o paquetes), como haría una persona calculando a ojo. " +
-                    "2. calorieRange debe ser un rango realista y no demasiado angosto (ej. una diferencia de al menos " +
-                    "10-15% entre el mínimo y el máximo), reflejando la incertidumbre real de estimar por una foto. " +
-                    "3. Redondea protein, carbs y fats a números enteros o a la unidad de 5 gramos más cercana; " +
-                    "son aproximaciones, no mediciones exactas. " +
-                    "4. Si es un producto empaquetado con tabla nutricional visible o legible, puedes usar esos datos " +
-                    "como referencia, pero igual repórtalos como aproximación, no como medición exacta. " +
-                    "5. Si la cantidad visible no es clara, usa un rango más amplio en vez de inventar precisión. " +
-                    "6. En observation, deja claro en una frase que es una estimación visual aproximada, no un valor exacto. " +
-                    "7. Responde siempre en español.",
-                },
-              ],
+              inline_data: {
+                mime_type: mimeType,
+                data: imagenLimpia,
+              },
+            },
+            {
+              text:
+                'Analiza esta imagen de alimento o bebida. ' +
+                'Si NO hay comida o bebida visible, responde con isFood en false y explica por qué en observation. ' +
+                'Si SÍ hay comida o bebida, identifica el alimento, la porción visible, una categoría ' +
+                '(plato, paquete, bebida o snack), una estimación de calorías con su rango, y una estimación ' +
+                'de macronutrientes en gramos: protein (proteína), carbs (carbohidratos) y fats (grasas). ' +
+                "Reglas: " +
+                "1. Nunca des una cifra que parezca medida con precisión de laboratorio (evita cosas como 782 o 347). " +
+                "Redondea estimatedCalories a un múltiplo de 10 (para snacks/porciones chicas) o de 50 " +
+                "(para platos completos o paquetes), como haría una persona calculando a ojo. " +
+                "2. calorieRange debe ser un rango realista y no demasiado angosto (ej. una diferencia de al menos " +
+                "10-15% entre el mínimo y el máximo), reflejando la incertidumbre real de estimar por una foto. " +
+                "3. Redondea protein, carbs y fats a números enteros o a la unidad de 5 gramos más cercana; " +
+                "son aproximaciones, no mediciones exactas. " +
+                "4. Si es un producto empaquetado con tabla nutricional visible o legible, puedes usar esos datos " +
+                "como referencia, pero igual repórtalos como aproximación, no como medición exacta. " +
+                "5. Si la cantidad visible no es clara, usa un rango más amplio en vez de inventar precisión. " +
+                "6. En observation, deja claro en una frase que es una estimación visual aproximada, no un valor exacto. " +
+                "7. Responde siempre en español.",
             },
           ],
-          generationConfig: {
-            temperature: 0.4,
-            responseMimeType: "application/json",
-            responseSchema: RESPONSE_SCHEMA,
-          },
-        }),
-      }
-    );
+        },
+      ],
+      generationConfig: {
+        temperature: 0.4,
+        responseMimeType: "application/json",
+        responseSchema: RESPONSE_SCHEMA,
+      },
+    });
 
-    const data = await response.json();
+    // Si el modelo principal esta saturado (503/UNAVAILABLE), Google recomienda
+    // reintentar mas tarde, pero durante una demostracion en vivo no hay tiempo
+    // de esperar. En vez de eso, se reintenta de inmediato contra un modelo
+    // distinto: al ser un recurso separado del lado de Google, no comparte la
+    // misma saturacion y suele responder aunque el modelo principal este lleno.
+    const MODELOS_EN_ORDEN = ["gemini-3.5-flash", "gemini-2.5-flash"];
+
+    let response;
+    let data;
+
+    for (const modelo of MODELOS_EN_ORDEN) {
+      response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "x-goog-api-key": GEMINI_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: cuerpoSolicitud,
+        }
+      );
+
+      data = await response.json();
+
+      const saturado = !response.ok && data?.error?.status === "UNAVAILABLE";
+      if (!saturado) break;
+
+      console.log(`Modelo ${modelo} saturado, probando siguiente modelo...`);
+    }
 
     if (!response.ok) {
       console.log("ERROR GEMINI API:", JSON.stringify(data));
