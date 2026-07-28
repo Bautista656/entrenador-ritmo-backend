@@ -50,6 +50,36 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Lista los modelos que la API key configurada puede usar para analizar
+// imagenes. Sirve para actualizar MODELOS_EN_ORDEN cuando Google descontinua
+// una version, sin tener que adivinar nombres.
+app.get("/modelos", async (req, res) => {
+  try {
+    if (!GEMINI_API_KEY) {
+      return res.status(500).json({ error: "Falta GEMINI_API_KEY en el servidor" });
+    }
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models",
+      { headers: { "x-goog-api-key": GEMINI_API_KEY } }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json(data);
+    }
+
+    const disponibles = (data.models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map((m) => m.name.replace("models/", ""));
+
+    res.json({ total: disponibles.length, modelos: disponibles });
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo consultar la lista", details: error.message });
+  }
+});
+
 app.post("/register", async (req, res) => {
   try {
     console.log("REGISTER:", req.body);
@@ -266,6 +296,17 @@ app.delete("/activities/:id", async (req, res) => {
 // Helpers para /analyze-food
 // -----------------------------
 
+// Modelos a probar en orden. Google satura sus modelos por temporadas y
+// descontinua versiones antiguas sin aviso previo en la aplicacion, asi que el
+// analisis recorre esta lista hasta encontrar uno que responda en lugar de
+// depender de un unico nombre fijo. Consulta GET /modelos para ver cuales
+// acepta realmente la API key configurada.
+const MODELOS_EN_ORDEN = [
+  "gemini-3.5-flash",
+  "gemini-3-flash",
+  "gemini-flash-latest",
+];
+
 const MIME_TYPES_PERMITIDOS = [
   "image/jpeg",
   "image/jpg",
@@ -443,13 +484,6 @@ app.post("/analyze-food", async (req, res) => {
       },
     });
 
-    // Si el modelo principal esta saturado (503/UNAVAILABLE), Google recomienda
-    // reintentar mas tarde, pero durante una demostracion en vivo no hay tiempo
-    // de esperar. En vez de eso, se reintenta de inmediato contra un modelo
-    // distinto: al ser un recurso separado del lado de Google, no comparte la
-    // misma saturacion y suele responder aunque el modelo principal este lleno.
-    const MODELOS_EN_ORDEN = ["gemini-3.5-flash", "gemini-2.5-flash"];
-
     let response;
     let data;
 
@@ -468,10 +502,16 @@ app.post("/analyze-food", async (req, res) => {
 
       data = await response.json();
 
-      const saturado = !response.ok && data?.error?.status === "UNAVAILABLE";
-      if (!saturado) break;
+      // UNAVAILABLE = el modelo esta saturado ahora mismo.
+      // NOT_FOUND = ese modelo ya fue descontinuado por Google.
+      // En ambos casos el siguiente modelo de la lista puede funcionar.
+      const estado = data?.error?.status;
+      const vale_la_pena_seguir =
+        !response.ok && (estado === "UNAVAILABLE" || estado === "NOT_FOUND");
 
-      console.log(`Modelo ${modelo} saturado, probando siguiente modelo...`);
+      if (!vale_la_pena_seguir) break;
+
+      console.log(`Modelo ${modelo} no disponible (${estado}), probando siguiente...`);
     }
 
     if (!response.ok) {
