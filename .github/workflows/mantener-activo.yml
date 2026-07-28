@@ -1,0 +1,30 @@
+name: Mantener el backend despierto
+
+# El plan gratuito de Render suspende el servicio despues de aproximadamente
+# 15 minutos sin recibir peticiones, y la siguiente peticion tarda entre 30 y
+# 60 segundos en responder mientras el servidor vuelve a arrancar.
+#
+# Este flujo llama al endpoint /health cada 10 minutos -con margen antes de
+# llegar a los 15- para que el servicio nunca llegue a dormirse durante los
+# dias de pruebas ni el dia de la presentacion.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  # Permite lanzarlo a mano desde la pestana Actions de GitHub, util para
+  # confirmar que el flujo funciona sin esperar a que toque el horario.
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Llamar a /health
+        run: |
+          codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
+            https://entrenador-ritmo-backend.onrender.com/health)
+          echo "Codigo de respuesta: $codigo"
+
+          if [ "$codigo" -ne 200 ]; then
+            echo "El servidor no respondio con 200. Puede seguir arrancando."
+            exit 1
+          fi
