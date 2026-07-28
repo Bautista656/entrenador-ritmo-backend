@@ -303,7 +303,7 @@ app.delete("/activities/:id", async (req, res) => {
 // acepta realmente la API key configurada.
 const MODELOS_EN_ORDEN = [
   "gemini-3.5-flash",
-  "gemini-3-flash",
+  "gemini-3.6-flash",
   "gemini-flash-latest",
 ];
 
