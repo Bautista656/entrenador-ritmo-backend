@@ -351,7 +351,55 @@ const PROMPT_ANALISIS =
   "después, con exactamente estos campos: isFood (booleano), foodName (texto), " +
   "category (texto: plato, paquete, bebida o snack), portion (texto), " +
   "estimatedCalories (número), calorieRange (texto), protein (número), carbs (número), " +
-  "fats (número), confidence (texto), observation (texto).";
+  "fats (número), confidence (texto), observation (texto), recomendacion (texto) y " +
+  "porcionSugerida (texto). Deja recomendacion y porcionSugerida como cadena vacía " +
+  "salvo que más abajo se te dé el contexto de la persona.";
+
+/**
+ * Anade al prompt el contexto del usuario para que la IA redacte un consejo
+ * personalizado.
+ *
+ * Las metas y lo ya consumido llegan calculados desde la aplicacion con la
+ * ecuacion de Mifflin-St Jeor. Aqui se le pide explicitamente al modelo que NO
+ * recalcule esas cifras: interpretar numeros dados es algo que hace bien,
+ * mientras que la aritmetica es donde se equivoca.
+ *
+ * Devuelve cadena vacia cuando el usuario no ha llenado sus datos corporales,
+ * de modo que el analisis nutricional sigue funcionando sin personalizar.
+ */
+function bloqueDePerfil(perfil) {
+  if (!perfil || !perfil.caloriasMeta) return "";
+
+  const restantes = perfil.caloriasMeta - (perfil.caloriasConsumidas || 0);
+
+  return (
+    " CONTEXTO DE LA PERSONA que va a comer esto. " +
+    `Sexo: ${perfil.sexo}. Edad: ${perfil.edad} años. ` +
+    `Estatura: ${perfil.estaturaCm} cm. Peso: ${perfil.pesoKg} kg. ` +
+    `Nivel de actividad: ${perfil.nivelActividad}. Objetivo: ${perfil.objetivo}. ` +
+    "Metas diarias ya calculadas: " +
+    `${perfil.caloriasMeta} kcal, ${perfil.proteinaMeta} g de proteína, ` +
+    `${perfil.carbosMeta} g de carbohidratos, ${perfil.grasasMeta} g de grasas. ` +
+    "Lo que lleva consumido hoy antes de esta comida: " +
+    `${perfil.caloriasConsumidas || 0} kcal, ${perfil.proteinaConsumida || 0} g de proteína, ` +
+    `${perfil.carbosConsumidos || 0} g de carbohidratos, ${perfil.grasasConsumidas || 0} g de grasas. ` +
+    `Le quedan aproximadamente ${restantes} kcal disponibles para el resto del día. ` +
+    "INSTRUCCIONES PARA LOS CAMPOS recomendacion Y porcionSugerida: " +
+    "1. NO recalcules las metas ni los totales: ya vienen calculados con una fórmula " +
+    "médica y son correctos. Tu trabajo es interpretarlos, no rehacerlos. " +
+    "2. En recomendacion escribe 2 o 3 frases, en segundo persona y en español, " +
+    "diciendo si esta porción encaja bien en su día según su objetivo, qué " +
+    "macronutriente le conviene cuidar, y una sugerencia práctica y concreta " +
+    "(por ejemplo con qué acompañarla o en qué momento del día conviene más). " +
+    "3. Si la porción analizada es desproporcionada para esta persona, usa " +
+    "porcionSugerida para indicar una cantidad más adecuada (ejemplo: " +
+    "'2 tostadas en lugar de 4'). Si la porción ya es apropiada, deja " +
+    "porcionSugerida como cadena vacía. " +
+    "4. Sé alentador y concreto, nunca alarmista ni culposo: la persona está " +
+    "cuidando su alimentación y merece un tono que la acompañe. " +
+    "5. No des indicaciones médicas ni diagnósticos; esto es orientación general."
+  );
+}
 
 // La busqueda web de Google y la salida con esquema JSON no son compatibles
 // entre si: al combinarlas la API responde 400 con "Search Grounding can't be
@@ -481,6 +529,8 @@ function normalizarResultado(obj) {
       fats: 0,
       confidence: "baja",
       observation: obj?.observation || "No se detectó comida en la imagen",
+      recomendacion: "",
+      porcionSugerida: "",
     };
   }
 
@@ -496,6 +546,8 @@ function normalizarResultado(obj) {
     fats: Number(obj?.fats) || 0,
     confidence: normalizarConfianza(obj?.confidence),
     observation: String(obj?.observation || ""),
+    recomendacion: String(obj?.recomendacion || ""),
+    porcionSugerida: String(obj?.porcionSugerida || ""),
   };
 
   return revisarCoherencia(resultado);
@@ -552,6 +604,8 @@ const RESPONSE_SCHEMA = {
     fats: { type: "number" },
     confidence: { type: "string" },
     observation: { type: "string" },
+    recomendacion: { type: "string" },
+    porcionSugerida: { type: "string" },
   },
   required: [
     "isFood",
@@ -570,7 +624,7 @@ const RESPONSE_SCHEMA = {
 
 app.post("/analyze-food", async (req, res) => {
   try {
-    const { imageBase64, mimeType: mimeTypeBody } = req.body;
+    const { imageBase64, mimeType: mimeTypeBody, perfil } = req.body;
 
     if (!GEMINI_API_KEY) {
       return res.status(500).json({
@@ -597,7 +651,7 @@ app.post("/analyze-food", async (req, res) => {
 
     const partes = [
       { inline_data: { mime_type: mimeType, data: imagenLimpia } },
-      { text: PROMPT_ANALISIS },
+      { text: PROMPT_ANALISIS + bloqueDePerfil(perfil) },
     ];
 
     let response;
